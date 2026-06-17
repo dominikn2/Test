@@ -331,33 +331,6 @@ fn unmangle_type(dds_type: &str) -> Option<String> {
     Some(out)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unmangle_roundtrips_ros_names() {
-        assert_eq!(unmangle_topic("rt/chatter").as_deref(), Some("/chatter"));
-        assert_eq!(unmangle_topic("rt/ns/topic").as_deref(), Some("/ns/topic"));
-        assert_eq!(unmangle_topic("not_a_topic"), None);
-        assert_eq!(
-            unmangle_type("std_msgs::msg::dds_::String_").as_deref(),
-            Some("std_msgs/msg/String")
-        );
-        assert_eq!(
-            unmangle_type("geometry_msgs::msg::dds_::Twist_").as_deref(),
-            Some("geometry_msgs/msg/Twist")
-        );
-    }
-
-    #[test]
-    fn ros_names_split_correctly() {
-        let (name, ty) = ros_names("/foo/bar", "std_msgs/msg/String").unwrap();
-        assert_eq!(name.to_dds_name("rt", &NodeName::new("/", "n").unwrap(), ""), "rt/foo/bar");
-        assert_eq!(ty.dds_msg_type(), "std_msgs::msg::dds_::String_");
-    }
-}
-
 /// Convert a rosbridge topic + `pkg/msg/Type` name into ros2-client names.
 fn ros_names(topic: &str, type_name: &str) -> Result<(Name, MessageTypeName), BackendError> {
     let (ns, base) = match topic.rfind('/') {
@@ -398,4 +371,34 @@ fn to_qos(qos: &QosSpec) -> QosPolicies {
         _ => policy::Durability::Volatile,
     });
     b.build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unmangle_roundtrips_ros_names() {
+        assert_eq!(unmangle_topic("rt/chatter").as_deref(), Some("/chatter"));
+        assert_eq!(unmangle_topic("rt/ns/topic").as_deref(), Some("/ns/topic"));
+        assert_eq!(unmangle_topic("not_a_topic"), None);
+        assert_eq!(
+            unmangle_type("std_msgs::msg::dds_::String_").as_deref(),
+            Some("std_msgs/msg/String")
+        );
+        assert_eq!(
+            unmangle_type("geometry_msgs::msg::dds_::Twist_").as_deref(),
+            Some("geometry_msgs/msg/Twist")
+        );
+    }
+
+    #[test]
+    fn ros_names_split_correctly() {
+        let (name, ty) = ros_names("/foo/bar", "std_msgs/msg/String").unwrap();
+        assert_eq!(
+            name.to_dds_name("rt", &NodeName::new("/", "n").unwrap(), ""),
+            "rt/foo/bar"
+        );
+        assert_eq!(ty.dds_msg_type(), "std_msgs::msg::dds_::String_");
+    }
 }
