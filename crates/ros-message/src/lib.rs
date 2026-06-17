@@ -307,6 +307,25 @@ mod roundtrip_tests {
     }
 
     #[test]
+    fn malicious_sequence_length_is_rejected_not_panicking() {
+        let r = reg();
+        let spec = r.message("std_msgs/msg/String").unwrap();
+        // A String's length prefix claims ~4 billion bytes in a tiny buffer.
+        let bytes = [0x00, 0x01, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x00];
+        let res = Codec::new(&r).decode(spec, &bytes);
+        assert!(res.is_err(), "huge length must error, not panic/allocate");
+    }
+
+    #[test]
+    fn truncated_buffer_errors_gracefully() {
+        let r = reg();
+        let spec = r.message("geometry_msgs/msg/Point").unwrap();
+        // Only 4 of the 24 required payload bytes are present.
+        let bytes = [0x00, 0x01, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04];
+        assert!(Codec::new(&r).decode(spec, &bytes).is_err());
+    }
+
+    #[test]
     fn time_accepts_ros1_aliases() {
         let r = reg();
         let spec = r.message("std_msgs/msg/Header").unwrap();

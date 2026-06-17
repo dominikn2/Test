@@ -35,7 +35,7 @@ struct Inner {
 /// An in-process [`RosBackend`].
 #[derive(Default)]
 pub struct LoopbackBackend {
-    inner: Mutex<Inner>,
+    inner: Arc<Mutex<Inner>>,
     counter: AtomicU64,
 }
 
@@ -181,21 +181,26 @@ impl RosBackend for LoopbackBackend {
         let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
         let (gs_res_tx, gs_res_rx) = oneshot::channel::<Result<(Cdr, i8), String>>();
 
-        // Bridge the hosting server's (Option<Cdr>, status) into the issuer's
-        // Result form.
-        tokio::spawn(async move {
-            let mapped = match inner_res_rx.await {
-                Ok((Some(cdr), status)) => Ok((cdr, status)),
-                Ok((None, status)) => Err(format!("action aborted (status {status})")),
-                Err(_) => Err("action server dropped".to_string()),
-            };
-            let _ = gs_res_tx.send(mapped);
-        });
-
         self.inner
             .lock()
             .cancels
             .insert((action.to_string(), goal_id), cancel_tx);
+
+        // Bridge the hosting server's (Option<Cdr>, status) into the issuer's
+        // Result form, and clean up the cancel entry on completion.
+        {
+            let inner = self.inner.clone();
+            let action_key = action.to_string();
+            tokio::spawn(async move {
+                let mapped = match inner_res_rx.await {
+                    Ok((Some(cdr), status)) => Ok((cdr, status)),
+                    Ok((None, status)) => Err(format!("action aborted (status {status})")),
+                    Err(_) => Err("action server dropped".to_string()),
+                };
+                inner.lock().cancels.remove(&(action_key, goal_id));
+                let _ = gs_res_tx.send(mapped);
+            });
+        }
 
         sender
             .send(ActionGoal {

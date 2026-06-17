@@ -34,10 +34,16 @@ struct Pending {
     last_touched: Instant,
 }
 
+/// Hard limits guarding against malicious fragment streams.
+const MAX_PENDING_GROUPS: usize = 1024;
+const MAX_TOTAL_FRAGMENTS: usize = 1_000_000;
+const MAX_BUFFERED_BYTES: usize = 256 * 1024 * 1024;
+
 /// Reassembles fragmented inbound messages, expiring stale partial groups.
 pub struct Defragmenter {
     pending: HashMap<String, Pending>,
     timeout_secs: u64,
+    buffered_bytes: usize,
 }
 
 /// Result of feeding a fragment.
@@ -55,6 +61,7 @@ impl Defragmenter {
         Defragmenter {
             pending: HashMap::new(),
             timeout_secs,
+            buffered_bytes: 0,
         }
     }
 
@@ -64,6 +71,19 @@ impl Defragmenter {
         if total == 0 || num >= total {
             return FragmentOutcome::Invalid("fragment index out of range");
         }
+        if total > MAX_TOTAL_FRAGMENTS {
+            return FragmentOutcome::Invalid("fragment total too large");
+        }
+        // Reject brand-new groups once we are tracking too many or buffering
+        // too much (defends against memory-exhaustion via distinct ids).
+        let is_new = !self.pending.contains_key(id);
+        if is_new && self.pending.len() >= MAX_PENDING_GROUPS {
+            return FragmentOutcome::Invalid("too many concurrent fragment groups");
+        }
+        if self.buffered_bytes.saturating_add(data.len()) > MAX_BUFFERED_BYTES {
+            return FragmentOutcome::Invalid("fragment buffer limit exceeded");
+        }
+        let data_len = data.len();
         let entry = self.pending.entry(id.to_string()).or_insert_with(|| Pending {
             total,
             parts: HashMap::new(),
@@ -77,9 +97,12 @@ impl Defragmenter {
         }
         entry.parts.insert(num, data);
         entry.last_touched = Instant::now();
+        self.buffered_bytes += data_len;
 
         if entry.parts.len() == entry.total {
             let entry = self.pending.remove(id).unwrap();
+            let freed: usize = entry.parts.values().map(|p| p.len()).sum();
+            self.buffered_bytes = self.buffered_bytes.saturating_sub(freed);
             let mut reconstructed = String::new();
             for i in 0..entry.total {
                 match entry.parts.get(&i) {
@@ -98,9 +121,15 @@ impl Defragmenter {
     fn sweep(&mut self, keep: &str) {
         let timeout = self.timeout_secs;
         let now = Instant::now();
+        let mut freed = 0usize;
         self.pending.retain(|id, p| {
-            id == keep || now.duration_since(p.last_touched).as_secs() < timeout
+            let live = id == keep || now.duration_since(p.last_touched).as_secs() < timeout;
+            if !live {
+                freed += p.parts.values().map(|s| s.len()).sum::<usize>();
+            }
+            live
         });
+        self.buffered_bytes = self.buffered_bytes.saturating_sub(freed);
     }
 }
 
@@ -133,6 +162,32 @@ mod tests {
             }
         }
         assert_eq!(result.as_deref(), Some("abcdefghij"));
+    }
+
+    #[test]
+    fn rejects_oversized_total() {
+        let mut de = Defragmenter::new(600);
+        assert!(matches!(
+            de.push("a", 0, usize::MAX, "x".into()),
+            FragmentOutcome::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn caps_concurrent_groups() {
+        let mut de = Defragmenter::new(600);
+        // Open the maximum number of distinct partial groups.
+        for i in 0..MAX_PENDING_GROUPS {
+            assert!(matches!(
+                de.push(&format!("g{i}"), 0, 2, "x".into()),
+                FragmentOutcome::Incomplete
+            ));
+        }
+        // One more brand-new group must be rejected.
+        assert!(matches!(
+            de.push("overflow", 0, 2, "x".into()),
+            FragmentOutcome::Invalid(_)
+        ));
     }
 
     #[test]

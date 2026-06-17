@@ -184,15 +184,23 @@ impl<'a> CdrReader<'a> {
 
     #[inline]
     fn take(&mut self, n: usize) -> Result<&'a [u8], CdrError> {
-        if self.pos + n > self.data.len() {
-            return Err(CdrError::Eof {
+        let end = self
+            .pos
+            .checked_add(n)
+            .filter(|end| *end <= self.data.len())
+            .ok_or(CdrError::Eof {
                 needed: n,
                 offset: self.pos,
-            });
-        }
-        let s = &self.data[self.pos..self.pos + n];
-        self.pos += n;
+            })?;
+        let s = &self.data[self.pos..end];
+        self.pos = end;
         Ok(s)
+    }
+
+    /// Bytes remaining in the body.
+    #[inline]
+    fn remaining(&self) -> usize {
+        self.data.len().saturating_sub(self.pos)
     }
 
     pub fn read_u8(&mut self) -> Result<u8, CdrError> {
@@ -238,9 +246,15 @@ impl<'a> CdrReader<'a> {
             .map_err(|_| CdrError::Utf8)
     }
 
-    /// Read a length prefix (u32) used by sequences, validating it fits.
+    /// Read a length prefix (u32) used by sequences, rejecting any length that
+    /// cannot possibly fit in the remaining buffer (each element occupies at
+    /// least one byte except for empty structs, so this bounds decode work to
+    /// the buffer size and prevents malicious-length DoS).
     pub fn read_seq_len(&mut self) -> Result<usize, CdrError> {
         let len = self.read_u32()? as usize;
+        if len > self.remaining() {
+            return Err(CdrError::BadLength { len });
+        }
         Ok(len)
     }
 
