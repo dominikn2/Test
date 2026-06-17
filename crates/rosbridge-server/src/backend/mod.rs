@@ -11,6 +11,8 @@
 //! * `dds::DdsBackend` — a real ROS2/DDS backend built on `ros2-client`
 //!   (compiled in when the `dds` feature is enabled).
 
+#[cfg(feature = "dds")]
+pub mod dds;
 pub mod loopback;
 
 use std::sync::Arc;
