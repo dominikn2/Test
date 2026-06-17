@@ -230,4 +230,92 @@ mod roundtrip_tests {
         let back = codec.decode(spec, &bytes).unwrap();
         assert_eq!(back["data"], json!([1.5, 2.5, 3.5]));
     }
+
+    #[test]
+    fn integer_extremes_roundtrip() {
+        let r = reg();
+        let codec = Codec::new(&r);
+        for (ty, val) in [
+            ("std_msgs/msg/Int64", json!(i64::MIN)),
+            ("std_msgs/msg/UInt64", json!(u64::MAX)),
+            ("std_msgs/msg/Int8", json!(-128)),
+            ("std_msgs/msg/UInt8", json!(255)),
+            ("std_msgs/msg/UInt32", json!(u32::MAX)),
+        ] {
+            let spec = r.message(ty).unwrap();
+            let bytes = codec.encode(spec, &json!({"data": val})).unwrap();
+            let back = codec.decode(spec, &bytes).unwrap();
+            assert_eq!(back["data"], val, "type {ty}");
+        }
+    }
+
+    #[test]
+    fn out_of_range_int_is_rejected() {
+        let r = reg();
+        let spec = r.message("std_msgs/msg/UInt8").unwrap();
+        let err = Codec::new(&r).encode(spec, &json!({"data": 256}));
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn string_sequence_roundtrip() {
+        let r = reg();
+        let spec = r.message("sensor_msgs/msg/JointState").unwrap();
+        let codec = Codec::with_now(&r, Some((0, 0)));
+        let v = json!({
+            "header": {"frame_id": ""},
+            "name": ["j1", "j2", "j3"],
+            "position": [0.1, 0.2, 0.3],
+            "velocity": [],
+            "effort": []
+        });
+        let bytes = codec.encode(spec, &v).unwrap();
+        let back = codec.decode(spec, &bytes).unwrap();
+        assert_eq!(back["name"], json!(["j1", "j2", "j3"]));
+        assert_eq!(back["position"][2], 0.3);
+        assert_eq!(back["velocity"], json!([]));
+    }
+
+    #[test]
+    fn empty_message_roundtrip() {
+        let r = reg();
+        let spec = r.message("std_msgs/msg/Empty").unwrap();
+        let codec = Codec::new(&r);
+        let bytes = codec.encode(spec, &json!({})).unwrap();
+        let back = codec.decode(spec, &bytes).unwrap();
+        assert_eq!(back, json!({}));
+    }
+
+    #[test]
+    fn service_request_response_roundtrip() {
+        let r = reg();
+        let svc = r.service("example_interfaces/srv/AddTwoInts").unwrap();
+        let codec = Codec::new(&r);
+        let req = codec.encode(&svc.request, &json!({"a": 40, "b": 2})).unwrap();
+        assert_eq!(codec.decode(&svc.request, &req).unwrap()["b"], 2);
+        let resp = codec.encode(&svc.response, &json!({"sum": 42})).unwrap();
+        assert_eq!(codec.decode(&svc.response, &resp).unwrap()["sum"], 42);
+    }
+
+    #[test]
+    fn bool_field_accepts_int() {
+        let r = reg();
+        let spec = r.message("std_msgs/msg/Bool").unwrap();
+        let codec = Codec::new(&r);
+        let bytes = codec.encode(spec, &json!({"data": 1})).unwrap();
+        assert_eq!(codec.decode(spec, &bytes).unwrap()["data"], true);
+    }
+
+    #[test]
+    fn time_accepts_ros1_aliases() {
+        let r = reg();
+        let spec = r.message("std_msgs/msg/Header").unwrap();
+        let codec = Codec::with_now(&r, Some((0, 0)));
+        // ROS1-style secs/nsecs must be accepted.
+        let v = json!({"stamp": {"secs": 7, "nsecs": 8}, "frame_id": "x"});
+        let bytes = codec.encode(spec, &v).unwrap();
+        let back = codec.decode(spec, &bytes).unwrap();
+        assert_eq!(back["stamp"]["sec"], 7);
+        assert_eq!(back["stamp"]["nanosec"], 8);
+    }
 }

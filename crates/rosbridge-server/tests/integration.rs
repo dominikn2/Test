@@ -317,6 +317,170 @@ async fn fragmentation_reassembly() {
     assert_eq!(reassembled["msg"]["data"], "x".repeat(200));
 }
 
+/// Try to read a JSON message within `ms`, returning `None` on timeout.
+async fn try_next_json(ws: &mut Ws, ms: u64) -> Option<Value> {
+    match tokio::time::timeout(Duration::from_millis(ms), ws.next()).await {
+        Ok(Some(Ok(Message::Text(t)))) => Some(serde_json::from_str(&t).unwrap()),
+        _ => None,
+    }
+}
+
+#[tokio::test]
+async fn set_level_none_suppresses_status() {
+    let url = start_server().await;
+    let mut a = connect(&url).await;
+    let mut b = connect(&url).await;
+
+    // Silence status messages for client b.
+    send(&mut b, json!({"op":"set_level","level":"none"})).await;
+    // This would normally yield a status error, now suppressed.
+    send(&mut b, json!({"op":"bogus"})).await;
+    // Subscribe and have a publish to b, which must be the first thing we see.
+    send(
+        &mut b,
+        json!({"op":"subscribe","topic":"/lvl","type":"std_msgs/msg/String"}),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    send(
+        &mut a,
+        json!({"op":"advertise","topic":"/lvl","type":"std_msgs/msg/String"}),
+    )
+    .await;
+    send(
+        &mut a,
+        json!({"op":"publish","topic":"/lvl","msg":{"data":"hi"}}),
+    )
+    .await;
+
+    let got = next_json(&mut b).await;
+    assert_eq!(got["op"], "publish", "status should have been suppressed");
+}
+
+#[tokio::test]
+async fn throttle_drops_intermediate_messages() {
+    let url = start_server().await;
+    let mut a = connect(&url).await;
+    let mut b = connect(&url).await;
+
+    send(
+        &mut b,
+        json!({"op":"subscribe","topic":"/t","type":"std_msgs/msg/Int32",
+               "throttle_rate":1000}),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    send(
+        &mut a,
+        json!({"op":"advertise","topic":"/t","type":"std_msgs/msg/Int32"}),
+    )
+    .await;
+    for i in 0..5 {
+        send(&mut a, json!({"op":"publish","topic":"/t","msg":{"data":i}})).await;
+    }
+
+    // First message arrives promptly.
+    let first = next_json(&mut b).await;
+    assert_eq!(first["op"], "publish");
+    // No second message within the throttle window.
+    assert!(
+        try_next_json(&mut b, 300).await.is_none(),
+        "throttle should drop intermediate messages"
+    );
+}
+
+#[tokio::test]
+async fn unsubscribe_stops_delivery() {
+    let url = start_server().await;
+    let mut a = connect(&url).await;
+    let mut b = connect(&url).await;
+
+    send(
+        &mut b,
+        json!({"op":"subscribe","topic":"/u","type":"std_msgs/msg/String","id":"s1"}),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    send(&mut b, json!({"op":"unsubscribe","topic":"/u","id":"s1"})).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    send(
+        &mut a,
+        json!({"op":"advertise","topic":"/u","type":"std_msgs/msg/String"}),
+    )
+    .await;
+    send(
+        &mut a,
+        json!({"op":"publish","topic":"/u","msg":{"data":"x"}}),
+    )
+    .await;
+
+    assert!(
+        try_next_json(&mut b, 300).await.is_none(),
+        "no delivery after unsubscribe"
+    );
+}
+
+#[tokio::test]
+async fn service_failure_response() {
+    let url = start_server().await;
+    let mut server_client = connect(&url).await;
+    let mut caller = connect(&url).await;
+
+    send(
+        &mut server_client,
+        json!({"op":"advertise_service","service":"/maybe","type":"std_srvs/srv/SetBool"}),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    send(
+        &mut caller,
+        json!({"op":"call_service","service":"/maybe","type":"std_srvs/srv/SetBool",
+               "args":{"data":true},"id":"c1"}),
+    )
+    .await;
+
+    let req = next_json(&mut server_client).await;
+    let req_id = req["id"].as_str().unwrap().to_string();
+    // Respond with failure.
+    send(
+        &mut server_client,
+        json!({"op":"service_response","service":"/maybe","id":req_id,"result":false}),
+    )
+    .await;
+
+    let resp = next_json(&mut caller).await;
+    assert_eq!(resp["op"], "service_response");
+    assert_eq!(resp["result"], false);
+}
+
+#[tokio::test]
+async fn cbor_binary_publish_to_server_is_accepted() {
+    let url = start_server().await;
+    let mut a = connect(&url).await;
+    let mut b = connect(&url).await;
+
+    send(
+        &mut b,
+        json!({"op":"subscribe","topic":"/bin","type":"std_msgs/msg/String"}),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Send advertise + publish as CBOR binary frames.
+    let adv = json!({"op":"advertise","topic":"/bin","type":"std_msgs/msg/String"});
+    let pubmsg = json!({"op":"publish","topic":"/bin","msg":{"data":"from cbor"}});
+    let mut buf = Vec::new();
+    ciborium::into_writer(&adv, &mut buf).unwrap();
+    a.send(Message::Binary(buf)).await.unwrap();
+    let mut buf2 = Vec::new();
+    ciborium::into_writer(&pubmsg, &mut buf2).unwrap();
+    a.send(Message::Binary(buf2)).await.unwrap();
+
+    let got = next_json(&mut b).await;
+    assert_eq!(got["msg"]["data"], "from cbor");
+}
+
 #[tokio::test]
 async fn unknown_op_returns_status_error() {
     let url = start_server().await;

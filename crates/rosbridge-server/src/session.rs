@@ -130,6 +130,9 @@ pub struct ClientSession {
     defrag: Mutex<Defragmenter>,
     frag_seed: AtomicU64,
     service_req_seq: AtomicU64,
+    /// Threshold controlling which `status` messages are forwarded to the
+    /// client (set via the `set_level` op). Messages are always logged.
+    status_level: Mutex<StatusLevel>,
 }
 
 impl ClientSession {
@@ -147,6 +150,7 @@ impl ClientSession {
             defrag: Mutex::new(Defragmenter::new(timeout)),
             frag_seed: AtomicU64::new(0),
             service_req_seq: AtomicU64::new(0),
+            status_level: Mutex::new(StatusLevel::Info),
         })
     }
 
@@ -190,8 +194,19 @@ impl ClientSession {
             IncomingMessage::CancelActionGoal(m) => self.op_cancel_action_goal(m),
             IncomingMessage::ActionFeedback(m) => self.op_action_feedback(m),
             IncomingMessage::ActionResult(m) => self.op_action_result(m),
-            IncomingMessage::Status(_) | IncomingMessage::SetLevel(_) | IncomingMessage::Auth(_) => {
-                /* status/set_level echoes and auth are accepted and ignored */
+            IncomingMessage::SetLevel(m) => {
+                if let Some(level) = StatusLevel::parse(&m.level) {
+                    *self.status_level.lock() = level;
+                } else {
+                    self.send_status(
+                        StatusLevel::Error,
+                        format!("invalid set_level value: {}", m.level),
+                        m.id,
+                    );
+                }
+            }
+            IncomingMessage::Status(_) | IncomingMessage::Auth(_) => {
+                /* status echoes and auth are accepted and ignored */
             }
             IncomingMessage::Fragment(m) => self.op_fragment(m),
             IncomingMessage::Unknown => {
@@ -221,8 +236,11 @@ impl ClientSession {
             StatusLevel::Warning => tracing::warn!(client = self.id, "{msg}"),
             _ => tracing::info!(client = self.id, "{msg}"),
         }
-        let v = json!({"op":"status","level":level.as_str(),"msg":msg,"id":id});
-        self.send_value(&v);
+        // Forward to the client only if within the configured verbosity.
+        if level.rank() <= self.status_level.lock().rank() {
+            let v = json!({"op":"status","level":level.as_str(),"msg":msg,"id":id});
+            self.send_value(&v);
+        }
     }
 
     fn next_frag_id(&self) -> String {
