@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 default-run = "rosbridge_websocket"
 
+[features]
+default = []
+# Real ROS2/DDS backend via the pure-Rust ros2-client + rustdds stack.
+dds = ["dep:ros2-client", "dep:rustdds", "dep:futures"]
+
 [[bin]]
 name = "rosbridge_websocket"
 path = "src/main.rs"
@@ -24,10 +29,14 @@ tokio-tungstenite.workspace = true
 futures-util.workspace = true
 base64.workspace = true
 bytes.workspace = true
-glob-match.workspace = true
+async-trait.workspace = true
+png.workspace = true
 clap.workspace = true
 parking_lot.workspace = true
 dashmap.workspace = true
+ros2-client = { workspace = true, optional = true }
+rustdds = { workspace = true, optional = true }
+futures = { version = "0.3", optional = true }
 
 [dev-dependencies]
 serde_json.workspace = true

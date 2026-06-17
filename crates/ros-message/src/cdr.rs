@@ -293,7 +293,7 @@ mod tests {
         let mut w = CdrWriter::new(Endian::Little);
         w.write_u8(7);
         w.write_u32(0xDEADBEEF);
-        w.write_f64(3.14159);
+        w.write_f64(1234.5678);
         w.write_string("hello");
         w.write_i16(-3);
         let bytes = w.into_bytes();
@@ -301,7 +301,7 @@ mod tests {
         let mut r = CdrReader::new(&bytes).unwrap();
         assert_eq!(r.read_u8().unwrap(), 7);
         assert_eq!(r.read_u32().unwrap(), 0xDEADBEEF);
-        assert!((r.read_f64().unwrap() - 3.14159).abs() < 1e-9);
+        assert!((r.read_f64().unwrap() - 1234.5678).abs() < 1e-9);
         assert_eq!(r.read_string().unwrap(), "hello");
         assert_eq!(r.read_i16().unwrap(), -3);
     }

@@ -15,7 +15,7 @@ authors = ["rosbridge-rs contributors"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["float_roundtrip", "arbitrary_precision"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
 serde_bytes = "0.11"
 ciborium = "0.2"
 thiserror = "2"
@@ -27,7 +27,8 @@ tokio-tungstenite = "0.24"
 futures-util = "0.3"
 base64 = "0.22"
 bytes = "1"
-glob-match = "0.2.1"
+async-trait = "0.1"
+png = "0.17"
 clap = { version = "4", features = ["derive"] }
 indexmap = { version = "2", features = ["serde"] }
 parking_lot = "0.12"

@@ -255,7 +255,7 @@ impl<'a> Codec<'a> {
                 Ok(())
             }
             BaseType::Message(name) => {
-                if auto_now || (is_time_type(name) && self.now.is_some() && auto_now) {
+                if auto_now {
                     let (sec, nsec) = self.now.unwrap_or((0, 0));
                     let mut m = Map::new();
                     m.insert("sec".into(), Value::from(sec));
