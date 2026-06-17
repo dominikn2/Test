@@ -73,9 +73,30 @@ Interface definitions beyond the bundled standard set are loaded from
 `$AMENT_PREFIX_PATH` (or `--interface-paths a:b:c`) by scanning
 `<prefix>/share/<pkg>/{msg,srv,action}/*`.
 
+## Benchmarks
+
+The dynamic codec is the hot path. Measured on the dev container
+(`cargo run --release -p ros-message --example bench_codec`):
+
+| Operation | Throughput |
+|-----------|-----------:|
+| `LaserScan` (360 beams, 1.5 KB) decode CDR→JSON | ~177k msg/s · 265 MB/s |
+| `LaserScan` encode JSON→CDR | ~46k msg/s · 69 MB/s |
+| `Image` (640×480 rgb8, 900 KB) decode CDR→JSON+base64 | ~2.6k msg/s · 2.4 GB/s |
+| `Image` **`cbor-raw` passthrough** (no decode) | ~29k msg/s · **27 GB/s** |
+
+The `cbor-raw` path is ~11× faster for large payloads because it never
+deserializes the message body — exactly the win this design targets for
+high-bandwidth topics like images and point clouds.
+
 ## Testing
 
 ```bash
-cargo test          # unit + end-to-end (real WebSocket) tests
+cargo test                         # unit + end-to-end (real WebSocket) tests
+cargo test --features dds --test dds   # real RTPS round-trip (two DDS peers)
 cargo clippy --workspace --all-targets
 ```
+
+The repository ships 67 default tests (protocol, codec with golden
+wire-format vectors, fragmentation, glob, compression, end-to-end over real
+WebSockets) plus a real-RTPS DDS round-trip test behind the `dds` feature.
