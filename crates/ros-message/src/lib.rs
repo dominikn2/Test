@@ -20,7 +20,7 @@ pub use spec::{ActionSpec, Constant, Field, MessageSpec, ServiceSpec};
 #[cfg(test)]
 mod roundtrip_tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     fn reg() -> Registry {
         Registry::with_standard_types()
@@ -94,6 +94,130 @@ mod roundtrip_tests {
         assert_eq!(back["stamp"]["sec"], 123);
         assert_eq!(back["stamp"]["nanosec"], 456);
         assert_eq!(back["frame_id"], "base");
+    }
+
+    /// Golden test: exact CDR bytes for `std_msgs/String{data:"hello"}` as a
+    /// real ROS2 (CycloneDDS/FastDDS) endpoint would emit them.
+    #[test]
+    fn golden_string_cdr() {
+        let r = reg();
+        let spec = r.message("std_msgs/msg/String").unwrap();
+        let bytes = Codec::new(&r).encode(spec, &json!({"data":"hello"})).unwrap();
+        let expected = [
+            0x00, 0x01, 0x00, 0x00, // CDR_LE encapsulation
+            0x06, 0x00, 0x00, 0x00, // string length = 6 (incl NUL)
+            b'h', b'e', b'l', b'l', b'o', 0x00,
+        ];
+        assert_eq!(bytes, expected);
+    }
+
+    /// Golden test: `geometry_msgs/Point{1.0, 2.0, 3.0}` — three 8-aligned f64.
+    #[test]
+    fn golden_point_cdr() {
+        let r = reg();
+        let spec = r.message("geometry_msgs/msg/Point").unwrap();
+        let bytes = Codec::new(&r)
+            .encode(spec, &json!({"x":1.0,"y":2.0,"z":3.0}))
+            .unwrap();
+        let mut expected = vec![0x00, 0x01, 0x00, 0x00];
+        expected.extend_from_slice(&1.0f64.to_le_bytes());
+        expected.extend_from_slice(&2.0f64.to_le_bytes());
+        expected.extend_from_slice(&3.0f64.to_le_bytes());
+        assert_eq!(bytes, expected);
+    }
+
+    /// Golden test exercising alignment: `std_msgs/Header` has a Time
+    /// (int32+uint32 = 8 bytes) then a 4-aligned string.
+    #[test]
+    fn golden_header_alignment() {
+        let r = reg();
+        let spec = r.message("std_msgs/msg/Header").unwrap();
+        let bytes = Codec::with_now(&r, Some((0, 0)))
+            .encode(spec, &json!({"stamp":{"sec":1,"nanosec":2},"frame_id":"m"}))
+            .unwrap();
+        let expected = [
+            0x00, 0x01, 0x00, 0x00, // encapsulation
+            0x01, 0x00, 0x00, 0x00, // sec = 1 (int32)
+            0x02, 0x00, 0x00, 0x00, // nanosec = 2 (uint32)
+            0x02, 0x00, 0x00, 0x00, // frame_id length = 2
+            b'm', 0x00, // "m" + NUL
+        ];
+        assert_eq!(bytes, expected);
+    }
+
+    /// Decoding the golden Point bytes must reproduce the values.
+    #[test]
+    fn golden_point_decode() {
+        let r = reg();
+        let spec = r.message("geometry_msgs/msg/Point").unwrap();
+        let mut bytes = vec![0x00, 0x01, 0x00, 0x00];
+        bytes.extend_from_slice(&4.5f64.to_le_bytes());
+        bytes.extend_from_slice(&(-6.0f64).to_le_bytes());
+        bytes.extend_from_slice(&0.0f64.to_le_bytes());
+        let v = Codec::new(&r).decode(spec, &bytes).unwrap();
+        assert_eq!(v["x"], 4.5);
+        assert_eq!(v["y"], -6.0);
+        assert_eq!(v["z"], 0.0);
+    }
+
+    /// Big-endian CDR must decode identically.
+    #[test]
+    fn decode_big_endian() {
+        let r = reg();
+        let spec = r.message("std_msgs/msg/Int32").unwrap();
+        // CDR_BE header (scheme byte 0x00), then int32 = 258 big-endian.
+        let bytes = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02];
+        let v = Codec::new(&r).decode(spec, &bytes).unwrap();
+        assert_eq!(v["data"], 258);
+    }
+
+    #[test]
+    fn array_of_messages_roundtrip() {
+        let r = reg();
+        let spec = r.message("nav_msgs/msg/Path").unwrap();
+        let codec = Codec::with_now(&r, Some((0, 0)));
+        let v = json!({
+            "header": {"frame_id": "map"},
+            "poses": [
+                {"header":{"frame_id":"a"}, "pose":{"position":{"x":1.0,"y":0.0,"z":0.0},
+                    "orientation":{"x":0.0,"y":0.0,"z":0.0,"w":1.0}}},
+                {"header":{"frame_id":"b"}, "pose":{"position":{"x":2.0,"y":0.0,"z":0.0},
+                    "orientation":{"x":0.0,"y":0.0,"z":0.0,"w":1.0}}}
+            ]
+        });
+        let bytes = codec.encode(spec, &v).unwrap();
+        let back = codec.decode(spec, &bytes).unwrap();
+        assert_eq!(back["poses"].as_array().unwrap().len(), 2);
+        assert_eq!(back["poses"][1]["pose"]["position"]["x"], 2.0);
+        assert_eq!(back["poses"][0]["header"]["frame_id"], "a");
+    }
+
+    #[test]
+    fn fixed_array_covariance() {
+        let r = reg();
+        let spec = r.message("geometry_msgs/msg/PoseWithCovariance").unwrap();
+        let codec = Codec::new(&r);
+        let cov: Vec<f64> = (0..36).map(|i| i as f64).collect();
+        let v = json!({
+            "pose": {"position":{"x":0.0,"y":0.0,"z":0.0},
+                     "orientation":{"x":0.0,"y":0.0,"z":0.0,"w":1.0}},
+            "covariance": cov
+        });
+        let bytes = codec.encode(spec, &v).unwrap();
+        let back = codec.decode(spec, &bytes).unwrap();
+        assert_eq!(back["covariance"].as_array().unwrap().len(), 36);
+        assert_eq!(back["covariance"][35], 35.0);
+    }
+
+    #[test]
+    fn nonfinite_float_becomes_null() {
+        let r = reg();
+        let spec = r.message("std_msgs/msg/Float64").unwrap();
+        let codec = Codec::new(&r);
+        // Encode NaN via null, decode back to null.
+        let bytes = codec.encode(spec, &json!({"data": null})).unwrap();
+        let back = codec.decode(spec, &bytes).unwrap();
+        assert_eq!(back["data"], Value::Null);
     }
 
     #[test]
