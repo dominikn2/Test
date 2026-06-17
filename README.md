@@ -106,4 +106,34 @@ cargo clippy --workspace --all-targets
 
 The repository ships 67 default tests (protocol, codec with golden
 wire-format vectors, fragmentation, glob, compression, end-to-end over real
-WebSockets) plus a real-RTPS DDS round-trip test behind the `dds` feature.
+WebSockets) plus a real-RTPS DDS round-trip test behind the `dds` feature and
+a TLS acceptor test behind the `tls` feature. The compiled binary is also
+verified end-to-end (two WebSocket clients exchanging a message through it).
+
+## Status & limitations
+
+Implemented and tested:
+
+* Full rosbridge v2.1 protocol over WebSockets, all ops, both service/action
+  directions, all compression modes, fragmentation, throttling/queueing,
+  glob security, `set_level`.
+* Dynamic CDR↔JSON codec with byte-exact ROS 2 wire format (golden-vector
+  tested), bundled standard interfaces + ament-prefix runtime loading.
+* Loopback backend (full feature set, incl. services & actions) and DDS
+  backend (topic pub/sub over real RTPS).
+* TLS (`tls` feature), benchmark, input hardening.
+
+Known gaps (honest scope for the prototype):
+
+* **Services & actions over the DDS backend** are not yet wired (they return
+  `Unsupported`; the loopback backend implements them fully). Dynamic
+  raw-service request-id carriage differs between Fast-DDS and Cyclone and
+  needs validation against a live ROS 2 peer.
+* `use_compression` (WebSocket permessage-deflate) is accepted but not yet
+  applied.
+* `wstring` is transported as UTF-8 rather than UTF-16 (rare in practice).
+
+The ROS 2 `rosbridge_server` branch removes the client-facing `status`/
+`set_level` ops (it logs only); this implementation keeps them as a
+backward-compatible superset (errors are both logged and sent to the client,
+subject to `set_level`).
