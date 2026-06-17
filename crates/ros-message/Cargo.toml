@@ -1,0 +1,17 @@
+[package]
+name = "ros-message"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure-Rust dynamic ROS2 message model: .msg parsing and schema-driven CDR <-> JSON codec"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+base64.workspace = true
+indexmap.workspace = true
+half.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
