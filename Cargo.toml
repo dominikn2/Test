@@ -36,7 +36,7 @@ dashmap = "6"
 half = "2"
 
 # pure-rust ROS2 / DDS backend (no ROS install required)
-ros2-client = "0.7"
+ros2-client = "0.8"
 rustdds = "0.11"
 
 [profile.release]
