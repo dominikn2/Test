@@ -65,7 +65,13 @@ impl Shared {
     }
 
     fn infer_type(&self, topic: &str) -> Option<String> {
-        self.topic_types.lock().get(topic).cloned()
+        // Prefer a type learned locally from advertise/publish; otherwise ask
+        // the backend to discover it from the ROS graph.
+        self.topic_types
+            .lock()
+            .get(topic)
+            .cloned()
+            .or_else(|| self.backend.discover_type(topic))
     }
 }
 

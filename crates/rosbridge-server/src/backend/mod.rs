@@ -206,6 +206,13 @@ pub trait RosBackend: Send + Sync {
 
     /// Current ROS time as `(sec, nanosec)` for `"now"` substitution.
     fn now(&self) -> (i32, u32);
+
+    /// Best-effort discovery of a topic's message type from the ROS graph,
+    /// used to infer the type for `subscribe` when the client omits it.
+    /// Backends without discovery return `None`.
+    fn discover_type(&self, _topic: &str) -> Option<String> {
+        None
+    }
 }
 
 /// A shared backend handle.
