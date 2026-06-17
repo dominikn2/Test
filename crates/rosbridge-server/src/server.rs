@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
@@ -17,20 +18,102 @@ use crate::backend::SharedBackend;
 use crate::config::SharedConfig;
 use crate::session::{ClientSession, OutFrame, Shared};
 
+#[cfg(feature = "tls")]
+mod tls {
+    use std::fs::File;
+    use std::io::BufReader;
+    use std::sync::Arc;
+
+    use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use tokio_rustls::rustls::ServerConfig;
+    use tokio_rustls::TlsAcceptor;
+
+    /// Build a rustls [`TlsAcceptor`] from PEM cert and key files.
+    pub fn build_acceptor(certfile: &str, keyfile: &str) -> anyhow::Result<TlsAcceptor> {
+        let certs: Vec<CertificateDer<'static>> =
+            rustls_pemfile::certs(&mut BufReader::new(File::open(certfile)?))
+                .collect::<Result<_, _>>()?;
+        if certs.is_empty() {
+            anyhow::bail!("no certificates found in {certfile}");
+        }
+        let key: PrivateKeyDer<'static> =
+            rustls_pemfile::private_key(&mut BufReader::new(File::open(keyfile)?))?
+                .ok_or_else(|| anyhow::anyhow!("no private key found in {keyfile}"))?;
+        let config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)?;
+        Ok(TlsAcceptor::from(Arc::new(config)))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::io::Write;
+
+        #[test]
+        fn build_acceptor_from_self_signed_cert() {
+            // Generate a self-signed cert/key and confirm the acceptor builds
+            // (this also exercises the rustls crypto provider at runtime).
+            let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+            let mut cert_f = tempfile::NamedTempFile::new().unwrap();
+            cert_f.write_all(cert.cert.pem().as_bytes()).unwrap();
+            let mut key_f = tempfile::NamedTempFile::new().unwrap();
+            key_f
+                .write_all(cert.key_pair.serialize_pem().as_bytes())
+                .unwrap();
+
+            if let Err(e) = super::build_acceptor(
+                cert_f.path().to_str().unwrap(),
+                key_f.path().to_str().unwrap(),
+            ) {
+                panic!("acceptor build failed: {e}");
+            }
+        }
+
+        #[test]
+        fn build_acceptor_missing_file_errors() {
+            assert!(super::build_acceptor("/no/such/cert.pem", "/no/such/key.pem").is_err());
+        }
+    }
+}
+
 /// The rosbridge WebSocket server.
 pub struct Server {
     shared: Arc<Shared>,
     client_seq: AtomicU64,
     connected: Arc<AtomicU64>,
+    #[cfg(feature = "tls")]
+    tls: Option<tokio_rustls::TlsAcceptor>,
 }
 
 impl Server {
     /// Build a server from configuration, a type registry, and a ROS backend.
     pub fn new(cfg: SharedConfig, registry: Arc<Registry>, backend: SharedBackend) -> Arc<Self> {
+        #[cfg(feature = "tls")]
+        let tls = if cfg.ssl_enabled() {
+            match tls::build_acceptor(&cfg.certfile, &cfg.keyfile) {
+                Ok(a) => {
+                    tracing::info!("TLS enabled (certfile={})", cfg.certfile);
+                    Some(a)
+                }
+                Err(e) => {
+                    tracing::error!("failed to enable TLS: {e}; serving plaintext");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        #[cfg(not(feature = "tls"))]
+        if cfg.ssl_enabled() {
+            tracing::warn!("certfile/keyfile set but server built without the `tls` feature");
+        }
+
         Arc::new(Server {
             shared: Shared::new(cfg, registry, backend),
             client_seq: AtomicU64::new(0),
             connected: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "tls")]
+            tls,
         })
     }
 
@@ -93,14 +176,27 @@ impl Server {
         }
     }
 
-    // The accept-handshake closure's `Err` type (`ErrorResponse`) is fixed by
-    // the tungstenite API, so its size is not something we control here.
-    #[allow(clippy::result_large_err)]
+    /// Terminate TLS if configured, then run the WebSocket session.
     async fn handle_connection(
         self: &Arc<Self>,
         stream: TcpStream,
         id: u64,
     ) -> anyhow::Result<()> {
+        #[cfg(feature = "tls")]
+        if let Some(acceptor) = &self.tls {
+            let tls_stream = acceptor.accept(stream).await?;
+            return self.serve_ws(tls_stream, id).await;
+        }
+        self.serve_ws(stream, id).await
+    }
+
+    // The accept-handshake closure's `Err` type (`ErrorResponse`) is fixed by
+    // the tungstenite API, so its size is not something we control here.
+    #[allow(clippy::result_large_err)]
+    async fn serve_ws<S>(self: &Arc<Self>, stream: S, id: u64) -> anyhow::Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         let expected_path = self.shared.cfg.url_path.clone();
         let ws = tokio_tungstenite::accept_hdr_async(
             stream,

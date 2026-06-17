@@ -9,6 +9,8 @@ default-run = "rosbridge_websocket"
 default = []
 # Real ROS2/DDS backend via the pure-Rust ros2-client + rustdds stack.
 dds = ["dep:ros2-client", "dep:rustdds", "dep:futures"]
+# WSS / TLS termination (certfile + keyfile) via rustls.
+tls = ["dep:tokio-rustls", "dep:rustls-pemfile"]
 
 [[bin]]
 name = "rosbridge_websocket"
@@ -37,6 +39,10 @@ dashmap.workspace = true
 ros2-client = { workspace = true, optional = true }
 rustdds = { workspace = true, optional = true }
 futures = { version = "0.3", optional = true }
+tokio-rustls = { version = "0.26", optional = true }
+rustls-pemfile = { version = "2", optional = true }
 
 [dev-dependencies]
 serde_json.workspace = true
+rcgen = "0.13"
+tempfile = "3"

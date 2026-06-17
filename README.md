@@ -67,7 +67,14 @@ cargo run --release -- --port 9090
 
 # Real ROS 2 / DDS bridge (pure Rust, still no ROS 2 install required):
 cargo run --release --features dds -- --port 9090 --backend dds
+
+# WSS / TLS termination:
+cargo run --release --features tls -- --port 9090 \
+    --certfile cert.pem --keyfile key.pem
 ```
+
+Optional Cargo features: `dds` (real ROS 2/DDS backend) and `tls` (WSS via
+rustls). Both are off by default to keep the core build lean.
 
 Interface definitions beyond the bundled standard set are loaded from
 `$AMENT_PREFIX_PATH` (or `--interface-paths a:b:c`) by scanning
