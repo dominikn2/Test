@@ -17,18 +17,17 @@ enables browser↔browser bridging and the full test-suite with no ROS install.
 > bridge universal — `rmw_zenoh` is not RTPS, so a pure-DDS stack cannot reach
 > it — and it gives full services support via ROS's own type introspection.
 
-## Why it's fast
+## Design
 
-* **Move bytes, not objects.** Like `foxglove_bridge`, the bridge transports
-  opaque CDR buffers and only pays the CDR↔JSON cost at the rosbridge JSON
-  boundary, which is inherent to the protocol. The `cbor-raw` path forwards the
-  raw CDR with **zero** deserialization.
-* **Schema-driven dynamic codec.** A pure-Rust `.msg`/`.srv`/`.action` parser
-  builds a cached type model; each message is a table-driven CDR walk, not a
-  re-parse.
+* **ROS owns serialization.** The bridge moves messages as `serde_json::Value`
+  and lets ROS 2's own type introspection (via r2r's untyped API) produce and
+  parse the CDR. There is no custom serializer on the runtime path — any
+  installed message/service type is handled, with no codegen of our own.
+* **RMW-agnostic.** Riding `rcl`/`rmw` means the one binary speaks whatever
+  middleware `RMW_IMPLEMENTATION` selects (CycloneDDS, Fast-DDS, Zenoh).
 * **Async, lock-light core.** Tokio end-to-end; per-client state behind tiny
   `parking_lot` critical sections; subscriptions coalesce to the lowest common
-  throttle/queue and fan out without copies where possible.
+  throttle/queue.
 * **Aggressive release profile.** fat LTO, one codegen unit, panic=abort.
 
 ## Workspace layout
@@ -36,8 +35,8 @@ enables browser↔browser bridging and the full test-suite with no ROS install.
 | Crate | Responsibility |
 |-------|----------------|
 | `rosbridge-protocol` | The rosbridge v2.1 message data-model and (de)serialization (transport- and ROS-agnostic). |
-| `ros-message` | Pure-Rust dynamic ROS 2 message model: `.msg`/`.srv`/`.action` parser, type registry (bundled standard interfaces + ament-prefix runtime loading), and a schema-driven, alignment-aware CDR ↔ `serde_json::Value` codec. |
 | `rosbridge-server` | The WebSocket server: per-client protocol sessions, all capabilities, compression, fragmentation, glob security, and the pluggable ROS backend (in-process `loopback` + RMW-agnostic `rcl` via r2r). |
+| `ros-message` | A **standalone** pure-Rust dynamic ROS 2 message library (`.msg`/`.srv`/`.action` parser + alignment-aware CDR↔JSON codec). It is **not** used by the bridge runtime (ROS does serialization); kept as an independent, tested library. |
 
 ## Feature parity
 
@@ -92,25 +91,9 @@ inside a sourced ROS 2 env with `libclang` — use the `docker/` setup) and `tls
 easiest way to build/run the `rcl` backend across the RMW matrix is the
 [Docker dev environment](docker/README.md): `make up-cyclone` / `make up-zenoh`.
 
-Interface definitions beyond the bundled standard set are loaded from
-`$AMENT_PREFIX_PATH` (or `--interface-paths a:b:c`) by scanning
-`<prefix>/share/<pkg>/{msg,srv,action}/*`.
-
-## Benchmarks
-
-The dynamic codec is the hot path. Measured on the dev container
-(`cargo run --release -p ros-message --example bench_codec`):
-
-| Operation | Throughput |
-|-----------|-----------:|
-| `LaserScan` (360 beams, 1.5 KB) decode CDR→JSON | ~177k msg/s · 265 MB/s |
-| `LaserScan` encode JSON→CDR | ~46k msg/s · 69 MB/s |
-| `Image` (640×480 rgb8, 900 KB) decode CDR→JSON+base64 | ~2.6k msg/s · 2.4 GB/s |
-| `Image` **`cbor-raw` passthrough** (no decode) | ~29k msg/s · **27 GB/s** |
-
-The `cbor-raw` path is ~11× faster for large payloads because it never
-deserializes the message body — exactly the win this design targets for
-high-bandwidth topics like images and point clouds.
+Message types come from the ROS 2 install: r2r generates bindings for the
+installed interface packages at build time, and the untyped API uses ROS's
+runtime introspection — so any installed type works with no configuration.
 
 ## Testing
 
@@ -134,12 +117,12 @@ Implemented and tested:
 * Full rosbridge v2.1 protocol over WebSockets, all ops, both service/action
   directions, all compression modes, fragmentation, throttling/queueing,
   glob security, `set_level`.
-* Dynamic CDR↔JSON codec with byte-exact ROS 2 wire format (golden-vector
-  tested), bundled standard interfaces + ament-prefix runtime loading.
+* Serialization delegated entirely to ROS 2 introspection (no custom codec on
+  the path); any installed message/service type works out of the box.
 * Loopback backend (full feature set, incl. services & actions).
 * `rcl` backend (via r2r): RMW-agnostic topics and services across CycloneDDS,
   Fast-DDS, and Zenoh.
-* TLS (`tls` feature), benchmark, input hardening.
+* TLS (`tls` feature), input hardening.
 
 Known gaps (honest scope for the prototype):
 
@@ -150,9 +133,11 @@ Known gaps (honest scope for the prototype):
 * The `rcl` backend module compiles only inside a sourced ROS 2 environment
   with `libclang` (use the `docker/` setup); it is excluded from the default
   build.
+* `cbor-raw` compression degrades to `cbor` on these backends: the raw
+  serialized CDR is no longer carried at the JSON boundary now that ROS owns
+  serialization.
 * `use_compression` (WebSocket permessage-deflate) is accepted but not yet
   applied.
-* `wstring` is transported as UTF-8 rather than UTF-16 (rare in practice).
 
 The ROS 2 `rosbridge_server` branch removes the client-facing `status`/
 `set_level` ops (it logs only); this implementation keeps them as a

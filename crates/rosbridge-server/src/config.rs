@@ -58,9 +58,6 @@ pub struct Config {
     pub call_services_in_new_thread: bool,
     pub default_call_service_timeout: f64,
     pub send_action_goals_in_new_thread: bool,
-
-    /// Additional ament-prefix paths to scan for interface definitions.
-    pub interface_paths: Vec<String>,
 }
 
 impl Default for Config {
@@ -87,7 +84,6 @@ impl Default for Config {
             call_services_in_new_thread: true,
             default_call_service_timeout: 5.0,
             send_action_goals_in_new_thread: true,
-            interface_paths: Vec::new(),
         }
     }
 }

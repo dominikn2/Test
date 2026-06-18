@@ -56,12 +56,7 @@ struct Args {
     #[arg(long, default_value_t = true)]
     send_action_goals_in_new_thread: bool,
 
-    /// Extra ament-prefix paths (colon-separated) to scan for interface defs.
-    /// Defaults to `$AMENT_PREFIX_PATH` when present.
-    #[arg(long)]
-    interface_paths: Option<String>,
-
-    /// ROS backend to use. `dds` requires the `dds` build feature.
+    /// ROS backend to use. `rcl` requires the `rcl` build feature.
     #[arg(long, default_value = "loopback")]
     backend: String,
 }
@@ -89,7 +84,6 @@ fn build_config(args: &Args) -> Config {
         call_services_in_new_thread: args.call_services_in_new_thread,
         default_call_service_timeout: args.default_call_service_timeout,
         send_action_goals_in_new_thread: args.send_action_goals_in_new_thread,
-        interface_paths: Vec::new(),
     };
     cfg.finalize_globs();
     cfg
