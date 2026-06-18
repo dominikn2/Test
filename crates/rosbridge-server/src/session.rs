@@ -6,10 +6,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use ros_message::{Codec, Registry};
 use rosbridge_protocol::incoming::*;
 use rosbridge_protocol::outgoing::StatusLevel;
 use rosbridge_protocol::IncomingMessage;
@@ -40,7 +39,6 @@ pub enum OutFrame {
 /// State shared across all client sessions of one server.
 pub struct Shared {
     pub cfg: SharedConfig,
-    pub registry: Arc<Registry>,
     pub backend: SharedBackend,
     /// Best-effort topic -> type map, learned from advertise/publish, used to
     /// infer types for `subscribe` when the client omits `type`.
@@ -48,10 +46,9 @@ pub struct Shared {
 }
 
 impl Shared {
-    pub fn new(cfg: SharedConfig, registry: Arc<Registry>, backend: SharedBackend) -> Arc<Self> {
+    pub fn new(cfg: SharedConfig, backend: SharedBackend) -> Arc<Self> {
         Arc::new(Shared {
             cfg,
-            registry,
             backend,
             topic_types: Mutex::new(HashMap::new()),
         })
@@ -92,7 +89,6 @@ struct SubEntry {
 
 struct SvcEntry {
     id: ServiceServerId,
-    type_name: String,
     task: JoinHandle<()>,
 }
 
@@ -104,11 +100,10 @@ struct ActEntry {
 }
 
 /// Channels for a goal currently being served by this client (client-hosted
-/// action server).
+/// action server). Feedback/result are JSON; the backend serializes for ROS.
 struct HostedGoal {
-    feedback_tx: mpsc::UnboundedSender<Vec<u8>>,
-    result_tx: Option<oneshot::Sender<(Option<Vec<u8>>, i8)>>,
-    action_type: String,
+    feedback_tx: mpsc::UnboundedSender<Value>,
+    result_tx: Option<oneshot::Sender<(Option<Value>, i8)>>,
 }
 
 #[derive(Default)]
@@ -118,7 +113,7 @@ struct State {
     services: HashMap<String, SvcEntry>,
     actions: HashMap<String, ActEntry>,
     /// request id -> responder for client-hosted services.
-    pending_service_responses: HashMap<String, oneshot::Sender<Option<Vec<u8>>>>,
+    pending_service_responses: HashMap<String, oneshot::Sender<Option<Value>>>,
     /// goal id (as string) -> action name, for cancellation of issued goals.
     issued_goals: HashMap<String, String>,
     /// goal id (as string) -> channels, for client-hosted action servers.
@@ -407,22 +402,13 @@ impl ClientSession {
             }
         };
 
-        // Encode JSON -> CDR.
-        let spec = match self.shared.registry.message(&type_name) {
-            Ok(s) => s,
-            Err(e) => {
-                self.send_status(StatusLevel::Error, format!("publish: {e}"), m.id);
-                return;
-            }
-        };
-        let codec = Codec::with_now(&self.shared.registry, Some(self.now()));
-        match codec.encode(spec, &m.msg) {
-            Ok(cdr) => {
-                if let Err(e) = self.shared.backend.publish(pub_id, &cdr) {
-                    self.send_status(StatusLevel::Error, format!("publish failed: {e}"), m.id);
-                }
-            }
-            Err(e) => self.send_status(StatusLevel::Error, format!("publish encode: {e}"), m.id),
+        // Auto-fill header.stamp with the current time when omitted (the ROS
+        // backend serializes the JSON itself), then hand the message off.
+        let _ = type_name;
+        let mut msg = m.msg;
+        fill_header_stamp(&mut msg, self.now());
+        if let Err(e) = self.shared.backend.publish(pub_id, &msg) {
+            self.send_status(StatusLevel::Error, format!("publish failed: {e}"), m.id);
         }
     }
 
@@ -489,12 +475,9 @@ impl ClientSession {
         let mut sids = HashMap::new();
         sids.insert(sid, params);
 
-        let task = self.clone().spawn_forwarder(
-            m.topic.clone(),
-            type_name.clone(),
-            rx,
-            effective.clone(),
-        );
+        let task = self
+            .clone()
+            .spawn_forwarder(m.topic.clone(), rx, effective.clone());
 
         state.subscriptions.insert(
             m.topic.clone(),
@@ -538,7 +521,6 @@ impl ClientSession {
     fn spawn_forwarder(
         self: Arc<Self>,
         topic: String,
-        type_name: String,
         mut rx: mpsc::UnboundedReceiver<Sample>,
         effective: Arc<Mutex<SubParams>>,
     ) -> JoinHandle<()> {
@@ -559,7 +541,7 @@ impl ClientSession {
                         },
                         _ = tokio::time::sleep_until(next_at.into()) => {
                             if let Some(s) = queue.pop_front() {
-                                self.emit_sample(&topic, &type_name, &s.cdr, &p);
+                                self.emit_sample(&topic, s.value, &p);
                                 last_sent = Some(Instant::now());
                             }
                         }
@@ -569,7 +551,7 @@ impl ClientSession {
                         None => break,
                         Some(s) => {
                             if p.throttle_rate == 0 {
-                                self.emit_sample(&topic, &type_name, &s.cdr, &p);
+                                self.emit_sample(&topic, s.value, &p);
                                 last_sent = Some(Instant::now());
                             } else if p.queue_length > 0 {
                                 push_bounded(&mut queue, s, p.queue_length);
@@ -578,7 +560,7 @@ impl ClientSession {
                                     .map(|t| Instant::now().duration_since(t) >= throttle)
                                     .unwrap_or(true);
                                 if ready {
-                                    self.emit_sample(&topic, &type_name, &s.cdr, &p);
+                                    self.emit_sample(&topic, s.value, &p);
                                     last_sent = Some(Instant::now());
                                 }
                             }
@@ -589,48 +571,21 @@ impl ClientSession {
         })
     }
 
-    /// Convert a received CDR sample into outgoing frame(s) and send them.
-    fn emit_sample(&self, topic: &str, type_name: &str, cdr: &[u8], p: &SubParams) {
-        for frame in self.build_publish_frames(topic, type_name, cdr, p) {
+    /// Convert a received JSON sample into outgoing frame(s) and send them.
+    fn emit_sample(&self, topic: &str, value: Value, p: &SubParams) {
+        for frame in self.build_publish_frames(topic, value, p) {
             self.send_frame(frame);
         }
     }
 
-    fn build_publish_frames(
-        &self,
-        topic: &str,
-        type_name: &str,
-        cdr: &[u8],
-        p: &SubParams,
-    ) -> Vec<OutFrame> {
-        if p.compression == Compression::CborRaw {
-            let (secs, nsecs) = wall_clock();
-            return vec![OutFrame::Binary(compression::cbor_raw_frame(
-                topic, cdr, secs, nsecs,
-            ))];
-        }
-        let spec = match self.shared.registry.message(type_name) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("cannot decode {type_name} on {topic}: {e}");
-                return Vec::new();
-            }
-        };
-        let codec = Codec::new(&self.shared.registry);
-        let msg = match codec.decode(spec, cdr) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!("decode error on {topic}: {e}");
-                return Vec::new();
-            }
-        };
+    fn build_publish_frames(&self, topic: &str, msg: Value, p: &SubParams) -> Vec<OutFrame> {
+        let v = json!({"op":"publish","topic":topic,"msg":msg});
         match p.compression {
-            Compression::Cbor => {
-                let v = json!({"op":"publish","topic":topic,"msg":msg});
-                vec![OutFrame::Binary(compression::to_cbor(&v))]
-            }
+            // `cbor-raw` requires the raw serialized CDR, which this backend
+            // boundary no longer carries (ROS owns serialization); it therefore
+            // behaves as `cbor` here.
+            Compression::Cbor | Compression::CborRaw => vec![OutFrame::Binary(compression::to_cbor(&v))],
             Compression::Png => {
-                let v = json!({"op":"publish","topic":topic,"msg":msg});
                 let s = serde_json::to_string(&v).unwrap_or_default();
                 match compression::png_encode(&s) {
                     Ok(b64) => {
@@ -640,8 +595,7 @@ impl ClientSession {
                     Err(_) => Vec::new(),
                 }
             }
-            _ => {
-                let v = json!({"op":"publish","topic":topic,"msg":msg});
+            Compression::None => {
                 self.text_frames(serde_json::to_string(&v).unwrap(), p.fragment_size)
             }
         }
@@ -684,43 +638,19 @@ impl ClientSession {
                 return;
             }
         };
-        let spec = match self.shared.registry.service(&type_name) {
-            Ok(s) => s.clone(),
-            Err(e) => {
-                self.send_status(StatusLevel::Error, format!("call_service: {e}"), id);
-                return;
-            }
-        };
-        let args = m.args.clone().unwrap_or(Value::Object(Map::new()));
-        let codec = Codec::with_now(&self.shared.registry, Some(self.now()));
-        let req_obj = args_to_object(&spec.request.fields, &args);
-        let request_cdr = match codec.encode(&spec.request, &req_obj) {
-            Ok(c) => c,
-            Err(e) => {
-                self.send_status(StatusLevel::Error, format!("call_service encode: {e}"), id);
-                return;
-            }
-        };
+        let request = args_or_empty(m.args.clone());
         let timeout = m.timeout.unwrap_or(self.shared.cfg.default_call_service_timeout);
         let fragment_size = m.fragment_size;
         let me = self.clone();
         let service_cl = service.clone();
-        let resp_type = type_name.clone();
         tokio::spawn(async move {
             let result = me
                 .shared
                 .backend
-                .call_service(&service_cl, &resp_type, request_cdr, timeout)
+                .call_service(&service_cl, &type_name, request, timeout)
                 .await;
             match result {
-                Ok(resp_cdr) => {
-                    let resp_spec = me.shared.registry.service(&resp_type);
-                    let values = match resp_spec {
-                        Ok(s) => Codec::new(&me.shared.registry)
-                            .decode(&s.response, &resp_cdr)
-                            .unwrap_or(Value::Object(Map::new())),
-                        Err(_) => Value::Object(Map::new()),
-                    };
+                Ok(values) => {
                     let v = json!({
                         "op":"service_response","service":service_cl,
                         "values":values,"result":true,"id":id
@@ -746,15 +676,6 @@ impl ClientSession {
         if !glob_allowed_service(&self.shared.cfg.services_glob, &m.service) {
             return;
         }
-        // Validate type resolvable.
-        if self.shared.registry.service(&m.srv_type).is_err() {
-            self.send_status(
-                StatusLevel::Error,
-                format!("advertise_service: unknown type {}", m.srv_type),
-                None,
-            );
-            return;
-        }
         let (sid, mut rx) = match self
             .shared
             .backend
@@ -773,7 +694,6 @@ impl ClientSession {
         }
         let me = self.clone();
         let service = m.service.clone();
-        let type_name = m.srv_type.clone();
         let task = tokio::spawn(async move {
             while let Some(req) = rx.recv().await {
                 let req_id = format!(
@@ -781,16 +701,7 @@ impl ClientSession {
                     service,
                     me.service_req_seq.fetch_add(1, Ordering::Relaxed)
                 );
-                let spec = match me.shared.registry.service(&type_name) {
-                    Ok(s) => s.clone(),
-                    Err(_) => {
-                        let _ = req.responder.send(None);
-                        continue;
-                    }
-                };
-                let args = Codec::new(&me.shared.registry)
-                    .decode(&spec.request, &req.request_cdr)
-                    .unwrap_or(Value::Object(Map::new()));
+                let args = req.request;
                 me.state
                     .lock()
                     .pending_service_responses
@@ -803,11 +714,7 @@ impl ClientSession {
         });
         self.state.lock().services.insert(
             m.service.clone(),
-            SvcEntry {
-                id: sid,
-                type_name: m.srv_type,
-                task,
-            },
+            SvcEntry { id: sid, task },
         );
     }
 
@@ -851,24 +758,9 @@ impl ClientSession {
             let _ = responder.send(None);
             return;
         }
-        // Encode the response values.
-        let type_name = self
-            .state
-            .lock()
-            .services
-            .get(&m.service)
-            .map(|e| e.type_name.clone());
-        let cdr = match type_name.and_then(|t| self.shared.registry.service(&t).ok().cloned()) {
-            Some(spec) => {
-                let values = m.values.clone().unwrap_or(Value::Object(Map::new()));
-                let obj = args_to_object(&spec.response.fields, &values);
-                Codec::with_now(&self.shared.registry, Some(self.now()))
-                    .encode(&spec.response, &obj)
-                    .ok()
-            }
-            None => None,
-        };
-        let _ = responder.send(cdr);
+        // The ROS backend serializes the response; forward the JSON values.
+        let values = args_or_empty(m.values.clone());
+        let _ = responder.send(Some(values));
     }
 
     // ---- actions: send_action_goal (client as caller) -------------------
@@ -882,24 +774,7 @@ impl ClientSession {
             );
             return;
         }
-        let spec = match self.shared.registry.action(&m.action_type) {
-            Ok(s) => s.clone(),
-            Err(e) => {
-                self.send_status(StatusLevel::Error, format!("send_action_goal: {e}"), m.id);
-                return;
-            }
-        };
-        let args = m.args.clone().unwrap_or(Value::Object(Map::new()));
-        let obj = args_to_object(&spec.goal.fields, &args);
-        let goal_cdr = match Codec::with_now(&self.shared.registry, Some(self.now()))
-            .encode(&spec.goal, &obj)
-        {
-            Ok(c) => c,
-            Err(e) => {
-                self.send_status(StatusLevel::Error, format!("goal encode: {e}"), m.id);
-                return;
-            }
-        };
+        let request = args_or_empty(m.args.clone());
         let id = m.id.clone();
         let action = m.action.clone();
         let action_type = m.action_type.clone();
@@ -909,7 +784,7 @@ impl ClientSession {
             let stream = match me
                 .shared
                 .backend
-                .send_action_goal(&action, &action_type, goal_cdr)
+                .send_action_goal(&action, &action_type, request)
                 .await
             {
                 Ok(s) => s,
@@ -930,8 +805,6 @@ impl ClientSession {
 
             let mut feedback = stream.feedback;
             let result = stream.result;
-            let result_spec = spec.result.clone();
-            let feedback_spec = spec.feedback.clone();
 
             // Feedback pump.
             if want_feedback {
@@ -939,10 +812,7 @@ impl ClientSession {
                 let action_fb = action.clone();
                 let id_fb = id.clone();
                 tokio::spawn(async move {
-                    while let Some(cdr) = feedback.recv().await {
-                        let values = Codec::new(&me_fb.shared.registry)
-                            .decode(&feedback_spec, &cdr)
-                            .unwrap_or(Value::Object(Map::new()));
+                    while let Some(values) = feedback.recv().await {
                         let v = json!({
                             "op":"action_feedback","action":action_fb,
                             "values":values,"id":id_fb
@@ -953,10 +823,7 @@ impl ClientSession {
             }
 
             match result.await {
-                Ok(Ok((cdr, status))) => {
-                    let values = Codec::new(&me.shared.registry)
-                        .decode(&result_spec, &cdr)
-                        .unwrap_or(Value::Object(Map::new()));
+                Ok(Ok((values, status))) => {
                     let v = json!({
                         "op":"action_result","action":action,
                         "values":values,"status":status,"result":true,"id":id
@@ -1002,14 +869,6 @@ impl ClientSession {
         if !glob_allowed_action(&self.shared.cfg.actions_glob, &m.action) {
             return;
         }
-        if self.shared.registry.action(&m.action_type).is_err() {
-            self.send_status(
-                StatusLevel::Error,
-                format!("advertise_action: unknown type {}", m.action_type),
-                None,
-            );
-            return;
-        }
         let (aid, mut rx) = match self
             .shared
             .backend
@@ -1031,13 +890,7 @@ impl ClientSession {
         let task = tokio::spawn(async move {
             while let Some(goal) = rx.recv().await {
                 let goal_key = uuid_to_string(&goal.goal_id);
-                let spec = match me.shared.registry.action(&action_type) {
-                    Ok(s) => s.clone(),
-                    Err(_) => continue,
-                };
-                let args = Codec::new(&me.shared.registry)
-                    .decode(&spec.goal, &goal.goal_cdr)
-                    .unwrap_or(Value::Object(Map::new()));
+                let args = goal.goal.clone();
                 let crate::backend::ActionGoal {
                     feedback_tx,
                     result_tx,
@@ -1051,7 +904,6 @@ impl ClientSession {
                     HostedGoal {
                         feedback_tx,
                         result_tx: Some(result_tx),
-                        action_type: action_type.clone(),
                     },
                 );
                 // Forward a ROS cancellation request to the client.
@@ -1103,10 +955,10 @@ impl ClientSession {
 
     /// Feedback from a client-hosted action server, routed to ROS.
     fn op_action_feedback(&self, m: ActionFeedback) {
-        let (action_type, feedback_tx) = {
+        let feedback_tx = {
             let state = self.state.lock();
             match state.hosted_goals.get(&m.id) {
-                Some(g) => (g.action_type.clone(), g.feedback_tx.clone()),
+                Some(g) => g.feedback_tx.clone(),
                 None => {
                     self.send_status(
                         StatusLevel::Error,
@@ -1117,26 +969,16 @@ impl ClientSession {
                 }
             }
         };
-        let spec = match self.shared.registry.action(&action_type) {
-            Ok(s) => s.clone(),
-            Err(_) => return,
-        };
-        let obj = args_to_object(&spec.feedback.fields, &m.values);
-        if let Ok(cdr) =
-            Codec::with_now(&self.shared.registry, Some(self.now())).encode(&spec.feedback, &obj)
-        {
-            let _ = feedback_tx.send(cdr);
-        }
+        // The ROS backend serializes; forward the JSON feedback values.
+        let _ = feedback_tx.send(m.values);
     }
 
     /// Final result from a client-hosted action server, routed to ROS.
     fn op_action_result(&self, m: ActionResult) {
         let status = m.status.unwrap_or(if m.result { 4 } else { 6 }) as i8;
-        let mut state = self.state.lock();
-        let hosted = match state.hosted_goals.remove(&m.id) {
+        let hosted = match self.state.lock().hosted_goals.remove(&m.id) {
             Some(h) => h,
             None => {
-                drop(state);
                 self.send_status(
                     StatusLevel::Error,
                     format!("action_result for unknown goal {}", m.id),
@@ -1145,25 +987,13 @@ impl ClientSession {
                 return;
             }
         };
-        drop(state);
-        let cdr = if m.result {
-            self.shared
-                .registry
-                .action(&hosted.action_type)
-                .ok()
-                .cloned()
-                .and_then(|spec| {
-                    let obj =
-                        args_to_object(&spec.result.fields, m.values.as_ref().unwrap_or(&Value::Null));
-                    Codec::with_now(&self.shared.registry, Some(self.now()))
-                        .encode(&spec.result, &obj)
-                        .ok()
-                })
+        let values = if m.result {
+            Some(args_or_empty(m.values))
         } else {
             None
         };
         if let Some(tx) = hosted.result_tx {
-            let _ = tx.send((cdr, status));
+            let _ = tx.send((values, status));
         }
     }
 
@@ -1210,11 +1040,6 @@ fn push_bounded(queue: &mut std::collections::VecDeque<Sample>, s: Sample, maxle
     queue.push_back(s);
 }
 
-fn wall_clock() -> (i64, u32) {
-    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-    (d.as_secs() as i64, d.subsec_nanos())
-}
-
 /// Map the protocol QoS plus deprecated latch/queue_size to a [`QosSpec`].
 fn resolve_qos(
     qos: Option<&rosbridge_protocol::QosProfile>,
@@ -1255,20 +1080,32 @@ fn resolve_qos(
     base
 }
 
-/// Build a request/response object from `args`, accepting both object and
-/// positional-array forms.
-fn args_to_object(fields: &[ros_message::Field], args: &Value) -> Value {
+/// Normalize an optional `args`/`values` payload, defaulting missing/null to an
+/// empty object. (ROS serialization expects a structured object; positional
+/// array args are passed through and validated by the backend.)
+fn args_or_empty(args: Option<Value>) -> Value {
     match args {
-        Value::Object(_) => args.clone(),
-        Value::Array(arr) => {
-            let mut m = Map::new();
-            for (f, v) in fields.iter().zip(arr.iter()) {
-                m.insert(f.name.clone(), v.clone());
-            }
-            Value::Object(m)
+        Some(Value::Null) | None => Value::Object(Map::new()),
+        Some(v) => v,
+    }
+}
+
+/// Auto-fill `header.stamp` with the current time when a message carries a
+/// `header` object whose `stamp` is absent, null, or the string `"now"`. This
+/// is the schema-free equivalent of rosbridge's header auto-stamping.
+fn fill_header_stamp(value: &mut Value, now: (i32, u32)) {
+    if let Some(Value::Object(header)) = value.as_object_mut().and_then(|o| o.get_mut("header")) {
+        let needs = match header.get("stamp") {
+            None | Some(Value::Null) => true,
+            Some(Value::String(s)) => s == "now",
+            _ => false,
+        };
+        if needs {
+            let mut stamp = Map::new();
+            stamp.insert("sec".into(), Value::from(now.0));
+            stamp.insert("nanosec".into(), Value::from(now.1));
+            header.insert("stamp".into(), Value::Object(stamp));
         }
-        Value::Null => Value::Object(Map::new()),
-        other => other.clone(),
     }
 }
 

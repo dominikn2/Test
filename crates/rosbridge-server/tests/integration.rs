@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use ros_message::Registry;
 use rosbridge_server::backend::loopback::LoopbackBackend;
 use rosbridge_server::config::Config;
 use rosbridge_server::server::Server;
@@ -23,9 +22,8 @@ async fn start_server() -> String {
         ..Default::default()
     };
     cfg.finalize_globs();
-    let registry = Arc::new(Registry::with_standard_types());
     let backend = Arc::new(LoopbackBackend::new());
-    let server = Server::new(Arc::new(cfg), registry, backend);
+    let server = Server::new(Arc::new(cfg), backend);
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {

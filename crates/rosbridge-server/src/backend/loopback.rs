@@ -1,7 +1,7 @@
 //! In-process backend: a message bus connecting clients of this server without
 //! any external middleware. Used by the test-suite and for browser↔browser
-//! bridging. Publishers fan out CDR to subscribers; client-hosted services and
-//! actions are reachable by client callers.
+//! bridging. Publishers fan out JSON messages to subscribers; client-hosted
+//! services and actions are reachable by client callers.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
+use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
 use super::*;
@@ -66,16 +67,14 @@ impl RosBackend for LoopbackBackend {
         Ok(id)
     }
 
-    fn publish(&self, id: PublisherId, cdr: &[u8]) -> Result<(), BackendError> {
+    fn publish(&self, id: PublisherId, msg: &Value) -> Result<(), BackendError> {
         let mut guard = self.inner.lock();
         let topic = match guard.publishers.get(&id) {
             Some(t) => t.clone(),
             None => return Err(BackendError::Failed("unknown publisher".into())),
         };
         if let Some(subs) = guard.topic_subs.get_mut(&topic) {
-            subs.retain(|(_, tx)| {
-                tx.send(Sample { cdr: cdr.to_vec() }).is_ok()
-            });
+            subs.retain(|(_, tx)| tx.send(Sample { value: msg.clone() }).is_ok());
         }
         Ok(())
     }
@@ -115,9 +114,9 @@ impl RosBackend for LoopbackBackend {
         &self,
         service: &str,
         _type_name: &str,
-        request_cdr: Cdr,
+        request: Value,
         timeout_secs: f64,
-    ) -> Result<Cdr, BackendError> {
+    ) -> Result<Value, BackendError> {
         let sender = self
             .inner
             .lock()
@@ -128,13 +127,13 @@ impl RosBackend for LoopbackBackend {
         let (resp_tx, resp_rx) = oneshot::channel();
         sender
             .send(ServiceRequest {
-                request_cdr,
+                request,
                 responder: resp_tx,
             })
             .map_err(|_| BackendError::Failed("service server gone".into()))?;
         let dur = std::time::Duration::from_secs_f64(timeout_secs.max(0.0));
         match tokio::time::timeout(dur, resp_rx).await {
-            Ok(Ok(Some(cdr))) => Ok(cdr),
+            Ok(Ok(Some(value))) => Ok(value),
             Ok(Ok(None)) => Err(BackendError::Failed("service returned failure".into())),
             Ok(Err(_)) => Err(BackendError::Failed("service server dropped".into())),
             Err(_) => Err(BackendError::Timeout),
@@ -165,7 +164,7 @@ impl RosBackend for LoopbackBackend {
         &self,
         action: &str,
         _type_name: &str,
-        goal_cdr: Cdr,
+        goal: Value,
     ) -> Result<GoalStream, BackendError> {
         let sender = self
             .inner
@@ -177,23 +176,23 @@ impl RosBackend for LoopbackBackend {
 
         let goal_id = self.make_goal_id();
         let (fb_tx, fb_rx) = mpsc::unbounded_channel();
-        let (inner_res_tx, inner_res_rx) = oneshot::channel::<(Option<Cdr>, i8)>();
+        let (inner_res_tx, inner_res_rx) = oneshot::channel::<(Option<Value>, i8)>();
         let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
-        let (gs_res_tx, gs_res_rx) = oneshot::channel::<Result<(Cdr, i8), String>>();
+        let (gs_res_tx, gs_res_rx) = oneshot::channel::<Result<(Value, i8), String>>();
 
         self.inner
             .lock()
             .cancels
             .insert((action.to_string(), goal_id), cancel_tx);
 
-        // Bridge the hosting server's (Option<Cdr>, status) into the issuer's
+        // Bridge the hosting server's (Option<Value>, status) into the issuer's
         // Result form, and clean up the cancel entry on completion.
         {
             let inner = self.inner.clone();
             let action_key = action.to_string();
             tokio::spawn(async move {
                 let mapped = match inner_res_rx.await {
-                    Ok((Some(cdr), status)) => Ok((cdr, status)),
+                    Ok((Some(value), status)) => Ok((value, status)),
                     Ok((None, status)) => Err(format!("action aborted (status {status})")),
                     Err(_) => Err("action server dropped".to_string()),
                 };
@@ -204,7 +203,7 @@ impl RosBackend for LoopbackBackend {
 
         sender
             .send(ActionGoal {
-                goal_cdr,
+                goal,
                 goal_id,
                 feedback_tx: fb_tx,
                 result_tx: inner_res_tx,

@@ -1235,7 +1235,6 @@ dependencies = [
  "png",
  "r2r",
  "rcgen",
- "ros-message",
  "rosbridge-protocol",
  "rustls-pemfile",
  "serde",

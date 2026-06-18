@@ -12,8 +12,6 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::Message;
 
-use ros_message::Registry;
-
 use crate::backend::SharedBackend;
 use crate::config::SharedConfig;
 use crate::session::{ClientSession, OutFrame, Shared};
@@ -86,8 +84,8 @@ pub struct Server {
 }
 
 impl Server {
-    /// Build a server from configuration, a type registry, and a ROS backend.
-    pub fn new(cfg: SharedConfig, registry: Arc<Registry>, backend: SharedBackend) -> Arc<Self> {
+    /// Build a server from configuration and a ROS backend.
+    pub fn new(cfg: SharedConfig, backend: SharedBackend) -> Arc<Self> {
         #[cfg(feature = "tls")]
         let tls = if cfg.ssl_enabled() {
             match tls::build_acceptor(&cfg.certfile, &cfg.keyfile) {
@@ -109,7 +107,7 @@ impl Server {
         }
 
         Arc::new(Server {
-            shared: Shared::new(cfg, registry, backend),
+            shared: Shared::new(cfg, backend),
             client_seq: AtomicU64::new(0),
             connected: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "tls")]

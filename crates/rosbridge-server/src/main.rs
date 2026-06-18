@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use clap::Parser;
-use ros_message::Registry;
 use rosbridge_server::backend::loopback::LoopbackBackend;
 use rosbridge_server::backend::SharedBackend;
 use rosbridge_server::config::{parse_glob_string, Config};
@@ -96,30 +95,11 @@ fn build_config(args: &Args) -> Config {
     cfg
 }
 
-fn build_registry(args: &Args) -> Registry {
-    let mut reg = Registry::with_standard_types();
-    let paths = args
-        .interface_paths
-        .clone()
-        .or_else(|| std::env::var("AMENT_PREFIX_PATH").ok())
-        .unwrap_or_default();
-    for p in paths.split(':').filter(|s| !s.is_empty()) {
-        match reg.load_ament_prefix(std::path::Path::new(p)) {
-            Ok(n) if n > 0 => tracing::info!("loaded {n} interface definitions from {p}"),
-            Ok(_) => {}
-            Err(e) => tracing::warn!("failed to scan {p}: {e}"),
-        }
-    }
-    tracing::info!("registry holds {} message types", reg.message_count());
-    reg
-}
-
-fn build_backend(name: &str, registry: &Arc<Registry>) -> anyhow::Result<SharedBackend> {
-    let _ = registry; // used only by the rcl backend
+fn build_backend(name: &str) -> anyhow::Result<SharedBackend> {
     match name {
         "loopback" => Ok(Arc::new(LoopbackBackend::new())),
         #[cfg(feature = "rcl")]
-        "rcl" => Ok(rosbridge_server::backend::rcl::RclBackend::shared(registry.clone())?),
+        "rcl" => Ok(rosbridge_server::backend::rcl::RclBackend::shared()?),
         other => anyhow::bail!(
             "unknown backend '{other}' (available: loopback{})",
             if cfg!(feature = "rcl") { ", rcl" } else { "" }
@@ -141,10 +121,9 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("both --certfile and --keyfile are required to enable SSL; ignoring");
     }
     let cfg = Arc::new(build_config(&args));
-    let registry = Arc::new(build_registry(&args));
-    let backend = build_backend(&args.backend, &registry)?;
+    let backend = build_backend(&args.backend)?;
 
-    let server = Server::new(cfg, registry, backend);
+    let server = Server::new(cfg, backend);
     server.serve(|addr| tracing::info!("bound to {addr}")).await?;
     Ok(())
 }

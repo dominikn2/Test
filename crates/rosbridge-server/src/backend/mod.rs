@@ -1,9 +1,10 @@
 //! The ROS backend abstraction.
 //!
-//! The protocol layer converts between rosbridge JSON and CDR bytes using the
-//! [`ros_message`] codec, then hands raw CDR to a [`RosBackend`]. This mirrors
-//! the foxglove-bridge "move raw bytes" design: the bridge does minimal CDR
-//! work and the backend only transports opaque buffers over its middleware.
+//! The boundary is `serde_json::Value` (the rosbridge-native representation):
+//! the protocol layer hands messages as JSON and the backend is responsible for
+//! any ROS serialization. The `rcl` backend delegates that entirely to ROS 2's
+//! own type introspection (via r2r's untyped API), so there is no custom CDR
+//! codec on the runtime path.
 //!
 //! Two implementations exist:
 //! * [`loopback::LoopbackBackend`] — an in-process bus, used for tests and for
@@ -19,10 +20,8 @@ pub mod rcl;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
-
-/// Raw CDR-encoded payload (including the 4-byte encapsulation header).
-pub type Cdr = Vec<u8>;
 
 /// Normalized QoS, derived from the protocol `qos` object plus deprecated
 /// `latch`/`queue_size` shortcuts.
@@ -90,37 +89,37 @@ pub struct ServiceServerId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ActionServerId(pub u64);
 
-/// A received topic sample.
+/// A received topic sample (the message as JSON).
 #[derive(Debug, Clone)]
 pub struct Sample {
-    pub cdr: Cdr,
+    pub value: Value,
 }
 
 /// An inbound service request routed to a client-hosted service server.
 pub struct ServiceRequest {
-    pub request_cdr: Cdr,
-    /// Channel to deliver the response CDR (or `None` on failure/abort).
-    pub responder: oneshot::Sender<Option<Cdr>>,
+    pub request: Value,
+    /// Channel to deliver the response (or `None` on failure/abort).
+    pub responder: oneshot::Sender<Option<Value>>,
 }
 
 /// An inbound action goal routed to a client-hosted action server. The hosting
 /// client emits feedback and a final result through the provided senders.
 pub struct ActionGoal {
-    pub goal_cdr: Cdr,
+    pub goal: Value,
     pub goal_id: [u8; 16],
-    /// The hosting client publishes feedback CDR here.
-    pub feedback_tx: mpsc::UnboundedSender<Cdr>,
-    /// The hosting client delivers the final `(result_cdr, status)` here;
+    /// The hosting client publishes feedback (JSON) here.
+    pub feedback_tx: mpsc::UnboundedSender<Value>,
+    /// The hosting client delivers the final `(result, status)` here;
     /// `None` result indicates failure/abort.
-    pub result_tx: oneshot::Sender<(Option<Cdr>, i8)>,
+    pub result_tx: oneshot::Sender<(Option<Value>, i8)>,
     /// Fires when the goal-issuing side requests cancellation.
     pub cancel_rx: oneshot::Receiver<()>,
 }
 
 /// Outcome of issuing an action goal as a client.
 pub struct GoalStream {
-    pub feedback: mpsc::UnboundedReceiver<Cdr>,
-    pub result: oneshot::Receiver<Result<(Cdr, i8), String>>,
+    pub feedback: mpsc::UnboundedReceiver<Value>,
+    pub result: oneshot::Receiver<Result<(Value, i8), String>>,
     pub goal_id: [u8; 16],
 }
 
@@ -146,8 +145,8 @@ pub trait RosBackend: Send + Sync {
         qos: &QosSpec,
     ) -> Result<PublisherId, BackendError>;
 
-    /// Publish a CDR payload through a previously created publisher.
-    fn publish(&self, id: PublisherId, cdr: &[u8]) -> Result<(), BackendError>;
+    /// Publish a message (JSON) through a previously created publisher.
+    fn publish(&self, id: PublisherId, msg: &Value) -> Result<(), BackendError>;
 
     /// Destroy a publisher.
     fn unadvertise(&self, id: PublisherId);
@@ -163,14 +162,14 @@ pub trait RosBackend: Send + Sync {
     /// Destroy a subscription.
     fn unsubscribe(&self, id: SubscriptionId);
 
-    /// Call a ROS service as a client and await the response CDR.
+    /// Call a ROS service as a client and await the response (JSON).
     async fn call_service(
         &self,
         service: &str,
         type_name: &str,
-        request_cdr: Cdr,
+        request: Value,
         timeout_secs: f64,
-    ) -> Result<Cdr, BackendError>;
+    ) -> Result<Value, BackendError>;
 
     /// Advertise a service to ROS; inbound requests are delivered on the
     /// returned channel for the client to answer.
@@ -188,7 +187,7 @@ pub trait RosBackend: Send + Sync {
         &self,
         action: &str,
         type_name: &str,
-        goal_cdr: Cdr,
+        goal: Value,
     ) -> Result<GoalStream, BackendError>;
 
     /// Cancel a previously sent goal.
