@@ -1,0 +1,30 @@
+{
+  "name": "rosbridge-rs (ROS 2 Jazzy)",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+  "remoteEnv": {
+    "RMW_IMPLEMENTATION": "rmw_cyclonedds_cpp"
+  },
+  "mounts": [
+    "source=rosbridge-cargo-target,target=/workspace/target,type=volume"
+  ],
+  "postCreateCommand": "bash -lc 'source /opt/ros/jazzy/setup.bash && cargo build --features rcl'",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "ms-iot.vscode-ros"
+      ],
+      "settings": {
+        "rust-analyzer.cargo.features": ["rcl"],
+        "rust-analyzer.check.command": "clippy"
+      }
+    }
+  },
+  "runArgs": ["--network=host"]
+}

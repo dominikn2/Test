@@ -1,0 +1,64 @@
+# RMW interop matrix for rosbridge-rs.
+#
+# The SAME bridge binary (rcl backend) is exercised against sample ROS 2 nodes
+# under different middlewares, selected by RMW_IMPLEMENTATION:
+#
+#   make -C .. up-cyclone     # CycloneDDS (RTPS)
+#   make -C .. up-zenoh       # Zenoh (rmw_zenoh + router)
+#   make -C .. up-fastdds     # Fast-DDS (RTPS)
+#
+# All services use host networking so DDS multicast discovery and the Zenoh
+# router (localhost:7447) work without per-RMW network plumbing. The bridge is
+# reachable at ws://localhost:9090.
+
+name: rosbridge-rs
+
+x-ros: &ros-common
+  image: rosbridge-rs-dev:latest
+  build:
+    context: ..
+    dockerfile: .devcontainer/Dockerfile
+  network_mode: host
+  environment:
+    RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}
+    ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+  volumes:
+    - ..:/workspace
+    - rosbridge-cargo-target:/workspace/target
+    - rosbridge-cargo-registry:/usr/local/cargo/registry
+
+services:
+  # The rosbridge server under test.
+  bridge:
+    <<: *ros-common
+    command: ["bash", "scripts/run-bridge.sh"]
+    profiles: ["cyclone", "fastdds", "zenoh"]
+
+  # Sample publisher: /chatter (std_msgs/String).
+  talker:
+    <<: *ros-common
+    command: ["ros2", "run", "demo_nodes_cpp", "talker"]
+    profiles: ["cyclone", "fastdds", "zenoh"]
+
+  # Sample service: /add_two_ints (example_interfaces/srv/AddTwoInts).
+  add-server:
+    <<: *ros-common
+    command: ["ros2", "run", "demo_nodes_cpp", "add_two_ints_server"]
+    profiles: ["cyclone", "fastdds", "zenoh"]
+
+  # Sample action: /fibonacci (action_tutorials_interfaces/action/Fibonacci).
+  fibonacci-server:
+    <<: *ros-common
+    command: ["ros2", "run", "action_tutorials_cpp", "fibonacci_action_server"]
+    profiles: ["cyclone", "fastdds", "zenoh"]
+
+  # Zenoh router, required only by rmw_zenoh. Listens on localhost:7447; nodes
+  # connect to it by default under host networking.
+  zenoh-router:
+    <<: *ros-common
+    command: ["ros2", "run", "rmw_zenoh_cpp", "rmw_zenohd"]
+    profiles: ["zenoh"]
+
+volumes:
+  rosbridge-cargo-target:
+  rosbridge-cargo-registry:

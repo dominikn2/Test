@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Optional CycloneDDS configuration. Not needed with the default host-network
+  compose setup (multicast discovery just works). Use it if you switch to a
+  bridged docker network: set CYCLONEDDS_URI=file:///workspace/docker/config/cyclonedds.xml
+  and, if multicast is unavailable, replace the auto interface with explicit
+  unicast peers.
+-->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain id="any">
+    <General>
+      <Interfaces>
+        <NetworkInterface autodetermine="true" priority="default" multicast="default"/>
+      </Interfaces>
+      <AllowMulticast>true</AllowMulticast>
+    </General>
+    <Discovery>
+      <!-- For bridged networks without multicast, list peers explicitly:
+      <Peers>
+        <Peer address="bridge"/>
+        <Peer address="talker"/>
+      </Peers>
+      -->
+      <ParticipantIndex>auto</ParticipantIndex>
+    </Discovery>
+  </Domain>
+</CycloneDDS>
