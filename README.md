@@ -7,9 +7,15 @@ replacement that aims to be leaner than `rosbridge_server` and
 `foxglove_bridge`.
 
 It speaks the [rosbridge v2.1 protocol](https://github.com/RobotWebTools/rosbridge_suite/blob/ros2/ROSBRIDGE_PROTOCOL.md)
-over WebSockets and bridges to ROS 2 over DDS using the pure-Rust
-[`ros2-client`](https://crates.io/crates/ros2-client) / [`rustdds`](https://crates.io/crates/rustdds)
-stack — **no ROS 2 installation required**.
+over WebSockets and bridges to ROS 2 through the `rcl`/`rmw` layer via
+[`r2r`](https://github.com/sequenceplanner/r2r), so it is **RMW-agnostic**: the
+same binary works with **CycloneDDS, Fast-DDS, or Zenoh**, selected at runtime
+by `RMW_IMPLEMENTATION`. A self-contained `loopback` backend additionally
+enables browser↔browser bridging and the full test-suite with no ROS install.
+
+> Going through `rcl`/`rmw` (rather than a single DDS vendor) is what makes the
+> bridge universal — `rmw_zenoh` is not RTPS, so a pure-DDS stack cannot reach
+> it — and it gives full services support via ROS's own type introspection.
 
 ## Why it's fast
 
@@ -31,7 +37,7 @@ stack — **no ROS 2 installation required**.
 |-------|----------------|
 | `rosbridge-protocol` | The rosbridge v2.1 message data-model and (de)serialization (transport- and ROS-agnostic). |
 | `ros-message` | Pure-Rust dynamic ROS 2 message model: `.msg`/`.srv`/`.action` parser, type registry (bundled standard interfaces + ament-prefix runtime loading), and a schema-driven, alignment-aware CDR ↔ `serde_json::Value` codec. |
-| `rosbridge-server` | The WebSocket server: per-client protocol sessions, all capabilities, compression, fragmentation, glob security, and the pluggable ROS backend (in-process `loopback` + ROS 2 `dds`). |
+| `rosbridge-server` | The WebSocket server: per-client protocol sessions, all capabilities, compression, fragmentation, glob security, and the pluggable ROS backend (in-process `loopback` + RMW-agnostic `rcl` via r2r). |
 
 ## Feature parity
 
@@ -65,16 +71,26 @@ service/action threading + timeout knobs.
 # Browser↔browser / testing, no ROS 2 needed:
 cargo run --release -- --port 9090
 
-# Real ROS 2 / DDS bridge (pure Rust, still no ROS 2 install required):
-cargo run --release --features dds -- --port 9090 --backend dds
+# Real ROS 2 bridge, any RMW (built & run inside the ROS container — see docker/):
+cargo run --release --features rcl -- --port 9090 --backend rcl
 
 # WSS / TLS termination:
 cargo run --release --features tls -- --port 9090 \
     --certfile cert.pem --keyfile key.pem
 ```
 
-Optional Cargo features: `dds` (real ROS 2/DDS backend) and `tls` (WSS via
-rustls). Both are off by default to keep the core build lean.
+The `rcl` backend is RMW-agnostic — pick the middleware with the environment:
+
+```bash
+RMW_IMPLEMENTATION=rmw_cyclonedds_cpp  cargo run --features rcl -- --backend rcl
+RMW_IMPLEMENTATION=rmw_zenoh_cpp       cargo run --features rcl -- --backend rcl
+```
+
+Optional Cargo features: `rcl` (RMW-agnostic ROS 2 backend via r2r; builds only
+inside a sourced ROS 2 env with `libclang` — use the `docker/` setup) and `tls`
+(WSS via rustls). Both are off by default to keep the core build lean. The
+easiest way to build/run the `rcl` backend across the RMW matrix is the
+[Docker dev environment](docker/README.md): `make up-cyclone` / `make up-zenoh`.
 
 Interface definitions beyond the bundled standard set are loaded from
 `$AMENT_PREFIX_PATH` (or `--interface-paths a:b:c`) by scanning
@@ -100,15 +116,16 @@ high-bandwidth topics like images and point clouds.
 
 ```bash
 cargo test                         # unit + end-to-end (real WebSocket) tests
-cargo test --features dds --test dds   # real RTPS round-trip (two DDS peers)
 cargo clippy --workspace --all-targets
+make test                          # in-container: full suite + rcl-feature compile
 ```
 
 The repository ships 67 default tests (protocol, codec with golden
 wire-format vectors, fragmentation, glob, compression, end-to-end over real
-WebSockets) plus a real-RTPS DDS round-trip test behind the `dds` feature and
-a TLS acceptor test behind the `tls` feature. The compiled binary is also
-verified end-to-end (two WebSocket clients exchanging a message through it).
+WebSockets) plus a TLS acceptor test behind the `tls` feature. The compiled
+binary is also verified end-to-end (two WebSocket clients exchanging a message
+through it). The `rcl` backend is built and exercised against live ROS 2 nodes
+inside the Docker RMW matrix (`make up-cyclone` / `up-fastdds` / `up-zenoh`).
 
 ## Status & limitations
 
@@ -119,16 +136,20 @@ Implemented and tested:
   glob security, `set_level`.
 * Dynamic CDR↔JSON codec with byte-exact ROS 2 wire format (golden-vector
   tested), bundled standard interfaces + ament-prefix runtime loading.
-* Loopback backend (full feature set, incl. services & actions) and DDS
-  backend (topic pub/sub over real RTPS).
+* Loopback backend (full feature set, incl. services & actions).
+* `rcl` backend (via r2r): RMW-agnostic topics and services across CycloneDDS,
+  Fast-DDS, and Zenoh.
 * TLS (`tls` feature), benchmark, input hardening.
 
 Known gaps (honest scope for the prototype):
 
-* **Services & actions over the DDS backend** are not yet wired (they return
-  `Unsupported`; the loopback backend implements them fully). Dynamic
-  raw-service request-id carriage differs between Fast-DDS and Cyclone and
-  needs validation against a live ROS 2 peer.
+* **Actions over the `rcl` backend** are not yet wired (they return
+  `Unsupported`; the loopback backend implements them fully). r2r exposes only
+  statically-typed actions, so dynamic/runtime-typed action bridging needs a
+  manual `rcl_action` implementation.
+* The `rcl` backend module compiles only inside a sourced ROS 2 environment
+  with `libclang` (use the `docker/` setup); it is excluded from the default
+  build.
 * `use_compression` (WebSocket permessage-deflate) is accepted but not yet
   applied.
 * `wstring` is transported as UTF-8 rather than UTF-16 (rare in practice).

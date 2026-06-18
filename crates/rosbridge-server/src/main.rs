@@ -114,14 +114,15 @@ fn build_registry(args: &Args) -> Registry {
     reg
 }
 
-fn build_backend(name: &str) -> anyhow::Result<SharedBackend> {
+fn build_backend(name: &str, registry: &Arc<Registry>) -> anyhow::Result<SharedBackend> {
+    let _ = registry; // used only by the rcl backend
     match name {
         "loopback" => Ok(Arc::new(LoopbackBackend::new())),
-        #[cfg(feature = "dds")]
-        "dds" => Ok(rosbridge_server::backend::dds::DdsBackend::shared()?),
+        #[cfg(feature = "rcl")]
+        "rcl" => Ok(rosbridge_server::backend::rcl::RclBackend::shared(registry.clone())?),
         other => anyhow::bail!(
             "unknown backend '{other}' (available: loopback{})",
-            if cfg!(feature = "dds") { ", dds" } else { "" }
+            if cfg!(feature = "rcl") { ", rcl" } else { "" }
         ),
     }
 }
@@ -141,7 +142,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let cfg = Arc::new(build_config(&args));
     let registry = Arc::new(build_registry(&args));
-    let backend = build_backend(&args.backend)?;
+    let backend = build_backend(&args.backend, &registry)?;
 
     let server = Server::new(cfg, registry, backend);
     server.serve(|addr| tracing::info!("bound to {addr}")).await?;

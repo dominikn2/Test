@@ -35,9 +35,9 @@ parking_lot = "0.12"
 dashmap = "6"
 half = "2"
 
-# pure-rust ROS2 / DDS backend (no ROS install required)
-ros2-client = "0.8"
-rustdds = "0.11"
+# rcl/rmw backend via r2r (RMW-agnostic: Cyclone, Fast-DDS, Zenoh).
+# Builds only inside a sourced ROS 2 environment (see docker/).
+r2r = "0.9"
 
 [profile.release]
 opt-level = 3

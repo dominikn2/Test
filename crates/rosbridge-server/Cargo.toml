@@ -7,8 +7,10 @@ default-run = "rosbridge_websocket"
 
 [features]
 default = []
-# Real ROS2/DDS backend via the pure-Rust ros2-client + rustdds stack.
-dds = ["dep:ros2-client", "dep:rustdds", "dep:futures"]
+# RMW-agnostic ROS 2 backend via r2r (rcl/rmw). Builds only inside a sourced
+# ROS 2 environment with libclang available (see docker/). Works with any RMW
+# (CycloneDDS, Fast-DDS, Zenoh) selected by RMW_IMPLEMENTATION.
+rcl = ["dep:r2r", "dep:futures"]
 # WSS / TLS termination (certfile + keyfile) via rustls.
 tls = ["dep:tokio-rustls", "dep:rustls-pemfile"]
 
@@ -36,8 +38,7 @@ png.workspace = true
 clap.workspace = true
 parking_lot.workspace = true
 dashmap.workspace = true
-ros2-client = { workspace = true, optional = true }
-rustdds = { workspace = true, optional = true }
+r2r = { workspace = true, optional = true }
 futures = { version = "0.3", optional = true }
 tokio-rustls = { version = "0.26", optional = true }
 rustls-pemfile = { version = "2", optional = true }

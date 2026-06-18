@@ -7,13 +7,14 @@
 //!
 //! Two implementations exist:
 //! * [`loopback::LoopbackBackend`] — an in-process bus, used for tests and for
-//!   browser↔browser bridging without any ROS2 middleware.
-//! * `dds::DdsBackend` — a real ROS2/DDS backend built on `ros2-client`
-//!   (compiled in when the `dds` feature is enabled).
+//!   browser↔browser bridging without any ROS 2 middleware.
+//! * `rcl::RclBackend` — an RMW-agnostic ROS 2 backend built on `r2r` (the
+//!   `rcl`/`rmw` layer), compiled in with the `rcl` feature. Works with any
+//!   middleware (CycloneDDS, Fast-DDS, Zenoh) via `RMW_IMPLEMENTATION`.
 
-#[cfg(feature = "dds")]
-pub mod dds;
 pub mod loopback;
+#[cfg(feature = "rcl")]
+pub mod rcl;
 
 use std::sync::Arc;
 
